@@ -1,29 +1,112 @@
 package com.ljqiii;
 
 import org.apache.maven.eventspy.AbstractEventSpy;
+import org.apache.maven.execution.ExecutionEvent;
+import org.apache.maven.execution.MavenSession;
+import org.apache.maven.plugin.MojoExecution;
+import org.apache.maven.project.DependencyResolutionRequest;
+import org.apache.maven.project.DependencyResolutionResult;
+import org.apache.maven.project.MavenProject;
+import org.eclipse.aether.RepositoryEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import javax.inject.Named;
 import javax.inject.Singleton;
+import java.util.ArrayList;
+import java.util.List;
+
+import static com.ljqiii.SpyConstants.*;
+
+import static com.ljqiii.EventInfoPrinter.printMavenEventInfo;
 
 @Named("Docker Judger Event Spy")
 @Singleton
 public class JudgerEventSpy extends AbstractEventSpy {
-
-    private final Logger logger = LoggerFactory.getLogger(getClass());
-
     @Override
-    public void init(Context context) throws Exception {
-        System.out.println("=========init context");
+    public void onEvent(Object event) {
+        try {
+            if (event instanceof ExecutionEvent) {
+                onExecutionEvent((ExecutionEvent) event);
+            } else if (event instanceof RepositoryEvent) {
+                onRepositoryEvent((RepositoryEvent) event);
+            } else if (event instanceof DependencyResolutionRequest) {
+                onDependencyResolutionRequest((DependencyResolutionRequest) event);
+            } else if (event instanceof DependencyResolutionResult) {
+                onDependencyResolutionResult((DependencyResolutionResult) event);
+            } else {
+                printMavenEventInfo("Unknown", "event", event);
+            }
+        } catch (Throwable e) {
+            collectAndPrintLastLinesForEA(e);
+        }
     }
 
-    @Override
-    public void onEvent(Object event) throws Exception {
-        System.out.println("=========on event");
+    private static void onDependencyResolutionRequest(DependencyResolutionRequest event) {
+        String projectId = event.getMavenProject() == null ? "unknown" : event.getMavenProject().getId();
+        printMavenEventInfo("DependencyResolutionRequest", "id", projectId);
     }
 
-    @Override
-    public void close() throws Exception {
-        super.close();
+    private static void onDependencyResolutionResult(DependencyResolutionResult event) {
+        List<Exception> errors = event.getCollectionErrors();
+        StringBuilder result = new StringBuilder();
+        for (Exception e : errors) {
+            if (result.length() > 0) {
+                result.append(NEWLINE);
+            }
+            result.append(e.getMessage());
+        }
+        printMavenEventInfo("DependencyResolutionResult", "error", result);
+    }
+
+    private static void collectAndPrintLastLinesForEA(Throwable e) {
+        //need to collect last 3 lines to send to EA
+        int lines = Math.max(e.getStackTrace().length, 3);
+        StringBuilder builder = new StringBuilder();
+        builder.append(e.getMessage());
+        for (int i = 0; i < lines; i++) {
+            builder.append(e.getStackTrace()[i]).append("\n");
+        }
+        printMavenEventInfo("INTERR", "error", builder);
+    }
+
+    private static void onRepositoryEvent(RepositoryEvent event) {
+        String errMessage = event.getException() == null ? "" : event.getException().getMessage();
+        String path = event.getFile() == null ? "" : event.getFile().getPath();
+        String artifactCoord = event.getArtifact() == null ? "" : event.getArtifact().toString();
+        printMavenEventInfo(event.getType(), "path", path, "artifactCoord", artifactCoord, "error", errMessage);
+    }
+
+    private static void onExecutionEvent(ExecutionEvent event) {
+        MojoExecution mojoExec = event.getMojoExecution();
+        String projectId = event.getProject() == null ? "unknown" : event.getProject().getId();
+        if (mojoExec != null) {
+            String errMessage = event.getException() == null ? "" : event.getException().getMessage();
+            printMavenEventInfo(event.getType(), "source", mojoExec.getSource(), "goal", mojoExec.getGoal(), "id", projectId, "error",
+                    errMessage);
+        } else {
+            if (event.getType() == ExecutionEvent.Type.SessionStarted) {
+                printSessionStartedEventAndReactorData(event, projectId);
+            } else {
+                printMavenEventInfo(event.getType(), "id", projectId);
+            }
+        }
+    }
+
+    private static void printSessionStartedEventAndReactorData(ExecutionEvent event, String projectId) {
+        MavenSession session = event.getSession();
+        if (session != null) {
+            List<MavenProject> projectsInReactor = session.getProjects();
+            if (projectsInReactor == null) {
+                projectsInReactor = new ArrayList<MavenProject>();
+            }
+            StringBuilder builder = new StringBuilder();
+            for (MavenProject project : projectsInReactor) {
+                builder.append(project.getGroupId()).append(":").append(project.getArtifactId()).append("&&");
+            }
+            printMavenEventInfo(ExecutionEvent.Type.SessionStarted, "id", projectId, "projects", builder.toString());
+        } else {
+            printMavenEventInfo(ExecutionEvent.Type.SessionStarted, "id", projectId, "projects", "");
+        }
     }
 }
